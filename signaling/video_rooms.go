@@ -31,14 +31,15 @@ func AddClientToRoom(roomId string, client *Client) {
 	}
 
 	room.Mu.Lock()
-	defer room.Mu.Unlock()
-
-	client.IsOfferer = len(room.Clients) == 0 // First one is offerer
 	room.Clients[client] = true
+	room.Mu.Unlock()
 
-	// Notify the client of their role
-	rolePayload := []byte(`{"type":"ready","isOfferer":` + boolToString(client.IsOfferer) + `}`)
-	client.Conn.WriteMessage(websocket.TextMessage, rolePayload)
+	// Send back the number of users in the room
+	userCount := len(room.Clients)
+	client.Conn.WriteJSON(map[string]interface{}{
+		"type":      "join_ack",
+		"userCount": userCount,
+	})
 }
 
 func boolToString(b bool) string {
@@ -74,5 +75,21 @@ func RemoveClient(client *Client) {
 	defer room.Mu.Unlock()
 
 	delete(room.Clients, client)
+
+	// Broadcast to others that this client has left
+	for otherClient := range room.Clients {
+		otherClient.Conn.WriteJSON(map[string]interface{}{
+			"type":   "user_left",
+			"roomId": client.RoomID,
+		})
+	}
+
 	client.Conn.Close()
+
+	// Optionally, clean up empty room
+	if len(room.Clients) == 0 {
+		roomsMu.Lock()
+		delete(rooms, client.RoomID)
+		roomsMu.Unlock()
+	}
 }

@@ -13,6 +13,7 @@ func main() {
 	r := gin.Default()
 	routes.AuthRoutes(r)
 	routes.WebSocketRoutes(r)
+	routes.UserRoutes(r)
 
 	r.Run("0.0.0.0:2340")
 }
