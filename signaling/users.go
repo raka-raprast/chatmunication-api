@@ -19,6 +19,23 @@ type UserClient struct {
 
 var userClients = make(map[string]*UserClient)
 var userClientsMu sync.Mutex
+var onlineUsers = make(map[string]bool)
+
+func broadcastOnlineStatus(userID, status string) {
+	msg := map[string]interface{}{
+		"type":   "online_status",
+		"userId": userID,
+		"status": status, // "online" or "offline"
+	}
+	payload, _ := json.Marshal(msg)
+
+	userClientsMu.Lock()
+	defer userClientsMu.Unlock()
+
+	for _, client := range userClients {
+		client.Send <- payload
+	}
+}
 
 func RegisterUser(userID string, conn *websocket.Conn) *UserClient {
 	client := &UserClient{
@@ -29,9 +46,24 @@ func RegisterUser(userID string, conn *websocket.Conn) *UserClient {
 
 	userClientsMu.Lock()
 	userClients[userID] = client
+	onlineUsers[userID] = true
 	userClientsMu.Unlock()
 
+	// Start write loop
 	go client.writeLoop()
+
+	// Send initial list of online users to this client only
+	go func() {
+		msg := map[string]interface{}{
+			"type":        "online_users",
+			"onlineUsers": GetOnlineUsers(),
+		}
+		bytes, _ := json.Marshal(msg)
+		client.Send <- bytes
+	}()
+
+	// Broadcast to others that this user is online
+	go broadcastOnlineStatus(userID, "online")
 
 	return client
 }
@@ -56,8 +88,12 @@ func RemoveUserClient(userID string) {
 	if client, ok := userClients[userID]; ok {
 		client.Conn.Close()
 		delete(userClients, userID)
+		delete(onlineUsers, userID)
 	}
 	userClientsMu.Unlock()
+
+	// Broadcast that this user is now offline
+	go broadcastOnlineStatus(userID, "offline")
 }
 
 func SendIncomingCall(fromUserID, toUserID, fromUsername, profilePicture, callType string) {
@@ -141,4 +177,15 @@ func SendChatMessage(fromUserID, toUserID, content, timestamp string) {
 	}
 	bytes, _ := json.Marshal(msg)
 	toClient.Send <- bytes
+}
+
+func GetOnlineUsers() []string {
+	userClientsMu.Lock()
+	defer userClientsMu.Unlock()
+
+	ids := make([]string, 0, len(onlineUsers))
+	for id := range onlineUsers {
+		ids = append(ids, id)
+	}
+	return ids
 }
