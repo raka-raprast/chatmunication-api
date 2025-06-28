@@ -12,6 +12,7 @@ func AuthRoutes(r *gin.Engine) {
 	{
 		auth.POST("/register", controllers.Register)
 		auth.POST("/login", controllers.Login)
+		auth.POST("/verify-otp", controllers.VerifyLoginOTP)
 		auth.GET("/me", middleware.JWTAuthMiddleware(), controllers.Me)
 	}
 }

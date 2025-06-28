@@ -8,6 +8,7 @@ import (
 )
 
 func main() {
+	config.InitRedis()
 	config.ConnectDB()
 
 	r := gin.Default()
