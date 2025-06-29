@@ -126,6 +126,7 @@ func GetUsersWithLastMessage(db *gorm.DB) gin.HandlerFunc {
 			msg := map[string]interface{}{
 				"id":              user.ID,
 				"username":        user.Username,
+				"email":           user.Email,
 				"profile_picture": user.ProfilePicture,
 			}
 
@@ -133,6 +134,7 @@ func GetUsersWithLastMessage(db *gorm.DB) gin.HandlerFunc {
 				msg["lastMessage"] = map[string]interface{}{
 					"content":   lastMessage.Content,
 					"timestamp": lastMessage.Timestamp,
+					"isSender":  lastMessage.FromUserID == currentUserID,
 				}
 			} else {
 				msg["lastMessage"] = nil
