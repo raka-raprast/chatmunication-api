@@ -17,5 +17,6 @@ func UserRoutes(r *gin.Engine) {
 		userGroup.DELETE("/contacts/:id", handlers.RemoveContact(config.DB))
 		userGroup.GET("/search", handlers.SearchUsers(config.DB))
 		userGroup.GET("/:id", handlers.GetUserByID(config.DB))
+		userGroup.PUT("/:id/fcm-token", handlers.UpdateFCMToken(config.DB))
 	}
 }

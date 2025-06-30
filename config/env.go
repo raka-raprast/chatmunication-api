@@ -9,8 +9,9 @@ import (
 )
 
 var (
-	EncryptionKey []byte
-	JWTSecret     []byte
+	EncryptionKey          []byte
+	JWTSecret              []byte
+	ServiceAccountFilePath string
 )
 
 func LoadEnv() {
@@ -38,6 +39,12 @@ func LoadEnv() {
 		log.Fatal("❌ JWT_SECRET not set")
 	}
 	JWTSecret = []byte(jwt)
+
+	// Load ServiceAccountFilePath
+	ServiceAccountFilePath = os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+	if ServiceAccountFilePath == "" {
+		log.Fatal("❌ GOOGLE_APPLICATION_CREDENTIALS not set")
+	}
 
 	log.Println("✅ Environment variables loaded")
 }

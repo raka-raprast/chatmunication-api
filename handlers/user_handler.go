@@ -490,3 +490,24 @@ func GetUserByID(db *gorm.DB) gin.HandlerFunc {
 		})
 	}
 }
+
+func UpdateFCMToken(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.Param("id") // URL param /:id
+
+		var req struct {
+			Token string `json:"token"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil || req.Token == "" {
+			c.JSON(400, gin.H{"error": "Invalid or missing token"})
+			return
+		}
+
+		if err := db.Model(&models.User{}).Where("id = ?", userID).Update("fcm_token", req.Token).Error; err != nil {
+			c.JSON(500, gin.H{"error": "Failed to update FCM token"})
+			return
+		}
+
+		c.JSON(200, gin.H{"message": "FCM token updated successfully"})
+	}
+}

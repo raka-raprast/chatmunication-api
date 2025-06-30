@@ -11,6 +11,7 @@ type User struct {
 	Password       string    `gorm:"not null" json:"-"`
 	ProfilePicture string    `json:"profile_picture"`
 	Email          string    `json:"email" gorm:"unique"`
+	FCMToken       string    `json:"fcm_token"`
 }
 
 func (u *User) BeforeCreate(tx *gorm.DB) (err error) {

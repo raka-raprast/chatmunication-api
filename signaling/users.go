@@ -3,6 +3,8 @@ package signaling
 import (
 	"auth-api/config"
 	"auth-api/models"
+	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -11,12 +13,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
+	"golang.org/x/oauth2/google"
 )
 
 type UserClient struct {
@@ -146,13 +150,10 @@ func RemoveUserClient(userID string) {
 	go broadcastOnlineStatus(userID, "offline")
 }
 
-func SendIncomingCall(fromUserID, toUserID, fromUsername, profilePicture, callType string) {
+func SendIncomingCall(fromUserID, toUserID, fromUsername, profilePicture, callType string) bool {
 	toClient := GetUserClient(toUserID)
-	if toClient == nil {
-		fmt.Println("📛 Callee not connected")
-		return
-	}
 	roomID := fmt.Sprintf("%s-%s", fromUserID, toUserID)
+
 	msg := map[string]interface{}{
 		"type":            "incoming_call",
 		"from":            fromUserID,
@@ -162,7 +163,14 @@ func SendIncomingCall(fromUserID, toUserID, fromUsername, profilePicture, callTy
 		"call_type":       callType,
 	}
 	bytes, _ := json.Marshal(msg)
+
+	if toClient == nil {
+		fmt.Println("📛 Callee not connected")
+		return false
+	}
+
 	toClient.Send <- bytes
+	return true
 }
 
 func SendCallAccepted(toUserID, roomID string) {
@@ -242,4 +250,79 @@ func GetOnlineUsers() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+func SendCallCancelled(toUserID string) {
+	toClient := GetUserClient(toUserID)
+	if toClient == nil {
+		fmt.Println("📛 Callee not connected to receive call_cancelled")
+		return
+	}
+
+	msg := map[string]interface{}{
+		"type": "call_cancelled",
+	}
+	bytes, _ := json.Marshal(msg)
+	toClient.Send <- bytes
+}
+
+// SendFCMNotification sends a notification using FCM HTTP v1 API
+func SendFCMNotification(token, title, body string, data map[string]string) error {
+
+	credentialsFile := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+	if credentialsFile == "" {
+		return fmt.Errorf("GOOGLE_APPLICATION_CREDENTIALS env not set")
+	}
+
+	ctx := context.Background()
+	credsData, err := os.ReadFile(credentialsFile)
+	if err != nil {
+		return fmt.Errorf("failed to read service account file: %v", err)
+	}
+
+	conf, err := google.JWTConfigFromJSON(credsData, "https://www.googleapis.com/auth/firebase.messaging")
+	if err != nil {
+		return fmt.Errorf("failed to parse service account: %v", err)
+	}
+	client := conf.Client(ctx)
+
+	var credStruct struct {
+		ProjectID string `json:"project_id"`
+	}
+	if err := json.Unmarshal(credsData, &credStruct); err != nil {
+		return fmt.Errorf("failed to extract project_id: %v", err)
+	}
+
+	message := map[string]interface{}{
+		"message": map[string]interface{}{
+			"token": token,
+			"notification": map[string]string{
+				"title": title,
+				"body":  body,
+			},
+			"data": data,
+		},
+	}
+
+	jsonBody, _ := json.Marshal(message)
+	url := fmt.Sprintf("https://fcm.googleapis.com/v1/projects/%s/messages:send", credStruct.ProjectID)
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	bodyResp, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("FCM error: %s\nResponse: %s", resp.Status, bodyResp)
+	}
+
+	return nil
 }
