@@ -8,6 +8,7 @@ import (
 )
 
 func main() {
+	config.LoadEnv()
 	config.InitRedis()
 	config.ConnectDB()
 

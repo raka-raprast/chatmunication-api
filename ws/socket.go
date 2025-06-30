@@ -21,7 +21,7 @@ func ServeWebSocket(c *gin.Context) {
 
 	// Verify token
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		return config.JWT_SECRET, nil
+		return config.JWTSecret, nil
 	})
 	if err != nil || !token.Valid {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})

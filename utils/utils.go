@@ -16,7 +16,7 @@ type Claims struct {
 func ParseToken(tokenStr string) (*Claims, error) {
 	log.Printf("🔐 Parsing token: %s", tokenStr)
 	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		return config.JWT_SECRET, nil // ✅ use the actual secret
+		return config.JWTSecret, nil // ✅ use the actual secret
 	})
 
 	if err != nil || !token.Valid {

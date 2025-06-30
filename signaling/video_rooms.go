@@ -42,13 +42,6 @@ func AddClientToRoom(roomId string, client *Client) {
 	})
 }
 
-func boolToString(b bool) string {
-	if b {
-		return "true"
-	}
-	return "false"
-}
-
 func BroadcastToRoom(roomId string, sender *Client, messageType int, data []byte) {
 	room := rooms[roomId]
 	if room == nil {

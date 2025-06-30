@@ -21,7 +21,7 @@ func JWTAuthMiddleware() gin.HandlerFunc {
 		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			return config.JWT_SECRET, nil
+			return config.JWTSecret, nil
 		})
 
 		if err != nil || !token.Valid {

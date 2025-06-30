@@ -126,11 +126,19 @@ func Login(c *gin.Context) {
       border-radius: 8px;
       box-shadow: 0 0 10px rgba(0,0,0,0.05);
       text-align: center;
+      border-top: 5px solid #1BB8FF;
+    }
+    .logo {
+      width: 80px;
+      margin-bottom: 20px;
+    }
+    h2 {
+      color: #147BEA;
     }
     .otp {
       font-size: 32px;
       font-weight: bold;
-      color: #333;
+      color: #147BEA;
       margin: 20px 0;
       letter-spacing: 4px;
     }
@@ -143,6 +151,7 @@ func Login(c *gin.Context) {
 </head>
 <body>
   <div class="container">
+    <img src="https://res.cloudinary.com/dtb7tvlgu/image/upload/v1751252329/ChatGPT_Image_Jun_27_2025_06_20_52_PM_2_wstq6o.png" alt="Chatmunition Logo" class="logo" />
     <h2>Chatmunition Login OTP</h2>
     <p>Please use the following One-Time Password to complete your login:</p>
     <div class="otp">%s</div>
@@ -240,7 +249,7 @@ func VerifyLoginOTP(c *gin.Context) {
 		"exp":     time.Now().Add(72 * time.Hour).Unix(),
 	})
 
-	tokenString, err := token.SignedString(config.JWT_SECRET)
+	tokenString, err := token.SignedString(config.JWTSecret)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Token generation failed"})
 		return

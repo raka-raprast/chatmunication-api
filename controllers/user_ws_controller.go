@@ -90,11 +90,11 @@ func UserSocketHandler(w http.ResponseWriter, r *http.Request) {
 		case "chat_message":
 			to := data["to"].(string)
 			content := data["content"].(string)
-			timestamp := data["timestamp"].(string) // optional but recommended
+			// timestamp := data["timestamp"].(string) // optional but recommended
 
 			log.Printf("💬 Message from %s to %s: %s", userID, to, content)
 
-			signaling.SendChatMessage(userID, to, content, timestamp)
+			signaling.SendChatMessage(userID, to, content)
 
 		}
 

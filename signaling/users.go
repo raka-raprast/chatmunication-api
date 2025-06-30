@@ -3,12 +3,20 @@ package signaling
 import (
 	"auth-api/config"
 	"auth-api/models"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/joho/godotenv"
 )
 
 type UserClient struct {
@@ -20,6 +28,48 @@ type UserClient struct {
 var userClients = make(map[string]*UserClient)
 var userClientsMu sync.Mutex
 var onlineUsers = make(map[string]bool)
+
+var encryptionKey []byte
+
+func init() {
+	// Load from .env
+	err := godotenv.Load()
+	if err != nil {
+		log.Println("⚠️ .env file not found. Skipping...")
+	}
+
+	base64Key := os.Getenv("ENCRYPTION_KEY_BASE64")
+	if base64Key == "" {
+		log.Fatal("❌ ENCRYPTION_KEY_BASE64 not set in environment")
+	}
+
+	encryptionKey, err = base64.StdEncoding.DecodeString(base64Key)
+	if err != nil {
+		log.Fatalf("❌ Failed to decode ENCRYPTION_KEY_BASE64: %v", err)
+	}
+
+	if len(encryptionKey) != 32 {
+		log.Fatalf("❌ ENCRYPTION_KEY must be 32 bytes (AES-256). Got %d bytes", len(encryptionKey))
+	}
+
+	fmt.Println("✅ Encryption key loaded. Length:", len(encryptionKey)) // should print 32
+}
+
+func encrypt(plainText string, key []byte) (string, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+	b := []byte(plainText)
+	cipherText := make([]byte, aes.BlockSize+len(b))
+	iv := cipherText[:aes.BlockSize]
+	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
+		return "", err
+	}
+	stream := cipher.NewCFBEncrypter(block, iv)
+	stream.XORKeyStream(cipherText[aes.BlockSize:], b)
+	return base64.StdEncoding.EncodeToString(cipherText), nil
+}
 
 func broadcastOnlineStatus(userID, status string) {
 	msg := map[string]interface{}{
@@ -143,26 +193,30 @@ func SendCallRejected(toUserID string) {
 	bytes, _ := json.Marshal(msg)
 	toClient.Send <- bytes
 }
+func SendChatMessage(fromUserID, toUserID, content string) {
+	parsedTime := time.Now().UTC()
 
-func SendChatMessage(fromUserID, toUserID, content, timestamp string) {
-	// 1. Save to database
-	parsedTime, err := time.Parse(time.RFC3339, timestamp)
+	// 🔐 Encrypt content
+	encryptedContent, err := encrypt(content, encryptionKey)
 	if err != nil {
-		parsedTime = time.Now()
+		fmt.Println("❌ Failed to encrypt message content:", err)
+		return
 	}
 
+	// 📦 Store encrypted in DB
 	message := models.Message{
 		FromUserID: fromUserID,
 		ToUserID:   toUserID,
-		Content:    content,
+		Content:    encryptedContent,
 		Timestamp:  parsedTime,
 	}
 
 	if err := config.DB.Create(&message).Error; err != nil {
 		fmt.Println("❌ Failed to store message in DB:", err)
+		return
 	}
 
-	// 2. Send via socket
+	// 📡 Send encrypted content via socket
 	toClient := GetUserClient(toUserID)
 	if toClient == nil {
 		fmt.Printf("📛 User %s is not connected. Cannot deliver message.\n", toUserID)
@@ -172,7 +226,7 @@ func SendChatMessage(fromUserID, toUserID, content, timestamp string) {
 	msg := map[string]interface{}{
 		"type":      "chat_message",
 		"from":      fromUserID,
-		"content":   content,
+		"content":   encryptedContent, // still encrypted; decrypt on client if E2EE
 		"timestamp": parsedTime.Format(time.RFC3339),
 	}
 	bytes, _ := json.Marshal(msg)
