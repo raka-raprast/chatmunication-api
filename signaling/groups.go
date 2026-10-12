@@ -55,11 +55,10 @@ func BroadcastGroupMemberJoined(groupID, joinedUserID string) {
 	memberCount := len(memberIDs)
 
 	for _, memberID := range memberIDs {
-		client := GetUserClient(memberID)
-		if client == nil {
+		if !IsOnline(memberID) {
 			continue
 		}
-		msg := map[string]interface{}{
+		deliverJSON(memberID, map[string]interface{}{
 			"type":        "group_member_joined",
 			"groupId":     groupID,
 			"userId":      joinedUserID,
@@ -69,9 +68,7 @@ func BroadcastGroupMemberJoined(groupID, joinedUserID string) {
 			"memberCount": memberCount,
 			"content":     content,
 			"timestamp":   parsedTime.Format(time.RFC3339),
-		}
-		payload, _ := json.Marshal(msg)
-		client.Send <- payload
+		})
 	}
 }
 
@@ -110,22 +107,22 @@ func SendGroupMessage(fromUserID, groupID, content string) {
 		senderName = sender.Username
 	}
 
-	msg := map[string]interface{}{
+	payload, err := json.Marshal(map[string]interface{}{
 		"type":      "group_message",
 		"groupId":   groupID,
 		"from":      fromUserID,
 		"content":   content,
 		"timestamp": parsedTime.Format(time.RFC3339),
+	})
+	if err != nil {
+		return
 	}
-	payload, _ := json.Marshal(msg)
 
 	for _, memberID := range memberIDs {
 		if memberID == fromUserID {
 			continue
 		}
-
-		if client := GetUserClient(memberID); client != nil {
-			client.Send <- payload
+		if deliver(memberID, payload) {
 			continue
 		}
 
@@ -155,20 +152,20 @@ func SendGroupTypingStatus(fromUserID, groupID string, isTyping bool) {
 		return
 	}
 
-	msg := map[string]interface{}{
+	payload, err := json.Marshal(map[string]interface{}{
 		"type":     "group_typing",
 		"groupId":  groupID,
 		"from":     fromUserID,
 		"isTyping": isTyping,
+	})
+	if err != nil {
+		return
 	}
-	payload, _ := json.Marshal(msg)
 
 	for _, memberID := range memberIDs {
 		if memberID == fromUserID {
 			continue
 		}
-		if client := GetUserClient(memberID); client != nil {
-			client.Send <- payload
-		}
+		deliver(memberID, payload)
 	}
 }

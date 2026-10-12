@@ -3,7 +3,6 @@ package utils
 import (
 	"auth-api/config"
 	"errors"
-	"log"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -13,14 +12,22 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
+// ParseToken validates a JWT and returns its claims.
+//
+// The signing method is pinned: without it, a token presenting a different
+// algorithm is handed to the HMAC verifier, which is the classic algorithm
+// confusion foothold. The token itself is never logged — it is a bearer
+// credential, and journald is readable by every operator.
 func ParseToken(tokenStr string) (*Claims, error) {
-	log.Printf("🔐 Parsing token: %s", tokenStr)
-	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		return config.JWTSecret, nil // ✅ use the actual secret
-	})
-
+	token, err := jwt.ParseWithClaims(
+		tokenStr,
+		&Claims{},
+		func(token *jwt.Token) (interface{}, error) {
+			return config.JWTSecret, nil
+		},
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+	)
 	if err != nil || !token.Valid {
-		log.Printf("❌ Error parsing JWT: %v", err)
 		return nil, errors.New("invalid token")
 	}
 
@@ -28,6 +35,5 @@ func ParseToken(tokenStr string) (*Claims, error) {
 	if !ok {
 		return nil, errors.New("could not parse claims")
 	}
-
 	return claims, nil
 }

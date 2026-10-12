@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"auth-api/signaling"
+	"auth-api/utils"
 	"log"
 	"net/http"
 
@@ -10,43 +11,53 @@ import (
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return true // allow all origins for dev
+		return true
 	},
 }
 
+// WebSocketHandler serves /ws: the WebRTC signaling relay. Peers in the
+// same room exchange SDP offers/answers and ICE candidates; the server
+// never inspects the payloads, it only forwards them.
 func WebSocketHandler(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
-	roomId := r.URL.Query().Get("room")
+	room := r.URL.Query().Get("room")
 
-	if token == "" || roomId == "" {
+	if token == "" || room == "" {
 		http.Error(w, "Missing token or room ID", http.StatusBadRequest)
 		return
 	}
 
-	conn, err := upgrader.Upgrade(w, r, nil)
+	// The relay carries call media negotiation. Without verifying the token
+	// anyone who guessed a room id could join a stranger's call and receive
+	// their SDP. The client already sends its JWT here, so this costs the
+	// frontend nothing.
+	claims, err := utils.ParseToken(token)
+	if err != nil {
+		log.Println("🚫 /ws rejected: invalid token")
+		http.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Both peers must resolve to the same room regardless of the order they
+	// concatenated the two user ids in.
+	room = signaling.CanonicalRoomID(room)
+
+	if a, b, ok := signaling.RoomParticipants(room); ok {
+		if claims.UserID != a && claims.UserID != b {
+			log.Printf("🚫 /ws rejected: %s is not a participant of room %s", claims.UserID, room)
+			http.Error(w, "Not a participant of this room", http.StatusForbidden)
+			return
+		}
+	}
+
+	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("Upgrade failed:", err)
 		return
 	}
 
-	client := &signaling.Client{
-		Conn:   conn,
-		RoomID: roomId,
-	}
+	peer := signaling.JoinRoom(room, claims.UserID, ws)
+	defer signaling.LeaveRoom(peer)
 
-	signaling.AddClientToRoom(roomId, client)
-	log.Printf("Client joined room %s", roomId)
-
-	defer signaling.RemoveClient(client)
-
-	for {
-		messageType, message, err := conn.ReadMessage()
-		if err != nil {
-			log.Println("Read error:", err)
-			break
-		}
-
-		// Forward message to other clients in the same room
-		signaling.BroadcastToRoom(roomId, client, messageType, message)
-	}
+	peer.Serve()
 }

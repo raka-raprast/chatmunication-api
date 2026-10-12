@@ -1,2 +1,4 @@
 .env
 firebase-service-account.json
+# compiled binary
+/chatmunication-api
