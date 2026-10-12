@@ -24,17 +24,22 @@ func UserSocketHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := userSocketUpgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Println("WebSocket upgrade failed:", err)
+	// Resolve the user BEFORE upgrading: an unrecognized userId (stale
+	// session from a different backend/environment, deleted account,
+	// etc.) should fail the handshake outright with a clean HTTP status
+	// the client can see — upgrading first and then silently closing the
+	// connection right after is indistinguishable from a transient
+	// network drop, which drives the client's reconnect-with-backoff
+	// logic into retrying forever against a userId that will never work.
+	var user models.User
+	if err := config.DB.First(&user, "id = ?", userID).Error; err != nil {
+		http.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
 
-	// Fetch user from DB
-	var user models.User
-	if err := config.DB.First(&user, "id = ?", userID).Error; err != nil {
-		log.Println("User not found:", err)
-		conn.Close()
+	conn, err := userSocketUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("WebSocket upgrade failed:", err)
 		return
 	}
 
