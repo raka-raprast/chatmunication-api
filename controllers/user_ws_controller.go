@@ -4,6 +4,7 @@ import (
 	"auth-api/config"
 	"auth-api/models"
 	"auth-api/signaling"
+	"auth-api/utils"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -35,8 +36,34 @@ type frame struct {
 
 // UserSocketHandler serves /user-socket: presence, chat, typing and
 // call-control events for one user.
+//
+// Authentication is accepted but not yet required. Identifying the user by
+// a bare ?userId= lets anyone who knows a uuid impersonate that user and
+// receive their messages, calls and presence. Requiring a token outright
+// would disconnect every currently shipped client, so: when ?token= is
+// supplied it is verified and wins over ?userId=, and once the app sends
+// it everywhere, the legacy branch below can be deleted to close the hole.
 func UserSocketHandler(w http.ResponseWriter, r *http.Request) {
 	userID := r.URL.Query().Get("userId")
+
+	if token := r.URL.Query().Get("token"); token != "" {
+		claims, err := utils.ParseToken(token)
+		if err != nil {
+			log.Println("🚫 /user-socket rejected: invalid token")
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+		if userID != "" && userID != claims.UserID {
+			log.Printf("🚫 /user-socket rejected: token for %s tried to open the socket of %s",
+				claims.UserID, userID)
+			http.Error(w, "Token does not match userId", http.StatusForbidden)
+			return
+		}
+		userID = claims.UserID
+	} else {
+		log.Printf("⚠️ /user-socket opened unauthenticated for %s — client has not been updated to send ?token=", userID)
+	}
+
 	if userID == "" {
 		http.Error(w, "Missing userId", http.StatusBadRequest)
 		return
