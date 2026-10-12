@@ -102,10 +102,10 @@ func Login(c *gin.Context) {
 	}
 
 	// ✅ Send OTP via email
-	from := "raprast.raka@gmail.com"
-	password := "czzh whyb trik ubbb"
-	smtpHost := "smtp.gmail.com"
-	smtpPort := "587"
+	from := config.SMTPFrom
+	password := config.SMTPPassword
+	smtpHost := config.SMTPHost
+	smtpPort := config.SMTPPort
 
 	htmlBody := fmt.Sprintf(`
 <!DOCTYPE html>

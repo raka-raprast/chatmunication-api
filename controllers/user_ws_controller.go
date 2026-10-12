@@ -42,7 +42,7 @@ func UserSocketHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Client %s", client.UserID)
 	log.Printf("🔌 Registered client: %s (%s)", user.Username, user.ID)
 
-	defer signaling.RemoveUserClient(userID)
+	defer signaling.RemoveUserClient(client)
 
 	for {
 		_, msg, err := conn.ReadMessage()
@@ -63,6 +63,12 @@ func UserSocketHandler(w http.ResponseWriter, r *http.Request) {
 			callType, ok := data["call_type"].(string)
 			if !ok {
 				callType = "video"
+			}
+
+			if !signaling.AreFriends(user.ID.String(), to) {
+				log.Printf("🚫 %s tried to call %s without an accepted friend request", user.Username, to)
+				signaling.SendActionError(client, "Add them as a friend before calling.")
+				continue
 			}
 
 			log.Println("🔔 Received room ID:", room)
@@ -127,8 +133,43 @@ func UserSocketHandler(w http.ResponseWriter, r *http.Request) {
 		case "chat_message":
 			to := data["to"].(string)
 			content := data["content"].(string)
+
+			if !signaling.AreFriends(userID, to) {
+				log.Printf("🚫 %s tried to message %s without an accepted friend request", userID, to)
+				signaling.SendActionError(client, "Add them as a friend before messaging.")
+				continue
+			}
+
 			log.Printf("💬 Message from %s to %s: %s", userID, to, content)
 			signaling.SendChatMessage(userID, to, content)
+
+		case "typing":
+			to, ok := data["to"].(string)
+			if !ok {
+				continue
+			}
+			isTyping, _ := data["isTyping"].(bool)
+			signaling.SendTypingStatus(userID, to, isTyping)
+
+		case "group_message":
+			groupID, ok := data["groupId"].(string)
+			if !ok {
+				continue
+			}
+			content, ok := data["content"].(string)
+			if !ok {
+				continue
+			}
+			log.Printf("💬 Group message from %s to group %s: %s", userID, groupID, content)
+			signaling.SendGroupMessage(userID, groupID, content)
+
+		case "group_typing":
+			groupID, ok := data["groupId"].(string)
+			if !ok {
+				continue
+			}
+			isTyping, _ := data["isTyping"].(bool)
+			signaling.SendGroupTypingStatus(userID, groupID, isTyping)
 		}
 
 	}

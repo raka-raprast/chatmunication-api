@@ -29,6 +29,21 @@ type UserClient struct {
 	Send   chan []byte
 }
 
+// SendActionError sends a one-off error frame back to the sender's own
+// socket — used when a gated action (message/call) is rejected, so the
+// client can surface *why* nothing happened instead of failing silently.
+func SendActionError(client *UserClient, message string) {
+	if client == nil {
+		return
+	}
+	msg := map[string]interface{}{
+		"type":    "action_error",
+		"message": message,
+	}
+	bytes, _ := json.Marshal(msg)
+	client.Send <- bytes
+}
+
 var userClients = make(map[string]*UserClient)
 var userClientsMu sync.Mutex
 var onlineUsers = make(map[string]bool)
@@ -74,7 +89,6 @@ func encrypt(plainText string, key []byte) (string, error) {
 	stream.XORKeyStream(cipherText[aes.BlockSize:], b)
 	return base64.StdEncoding.EncodeToString(cipherText), nil
 }
-
 func broadcastOnlineStatus(userID, status string) {
 	msg := map[string]interface{}{
 		"type":   "online_status",
@@ -91,12 +105,29 @@ func broadcastOnlineStatus(userID, status string) {
 	}
 }
 
+// pongWait/pingPeriod keep the long-lived /user-socket connection alive
+// across NAT/firewall idle-connection reaping (common on mobile hotspots,
+// which often kill silent TCP connections within 30-60s) — without this,
+// the socket dies silently with no app-visible error until the next read
+// attempt fails, breaking real-time messages/invites/typing until the
+// client reconnects.
+const (
+	pongWait   = 55 * time.Second
+	pingPeriod = 25 * time.Second
+)
+
 func RegisterUser(userID string, conn *websocket.Conn) *UserClient {
 	client := &UserClient{
 		UserID: userID,
 		Conn:   conn,
 		Send:   make(chan []byte, 256),
 	}
+
+	conn.SetReadDeadline(time.Now().Add(pongWait))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
 
 	userClientsMu.Lock()
 	userClients[userID] = client
@@ -122,11 +153,25 @@ func RegisterUser(userID string, conn *websocket.Conn) *UserClient {
 	return client
 }
 
+// writeLoop is the sole writer to c.Conn (gorilla/websocket requires a
+// single writer goroutine per connection), so the keepalive ping is sent
+// from here too rather than a separate ticker goroutine.
 func (c *UserClient) writeLoop() {
-	for msg := range c.Send {
-		err := c.Conn.WriteMessage(websocket.TextMessage, msg)
-		if err != nil {
-			break
+	ticker := time.NewTicker(pingPeriod)
+	defer ticker.Stop()
+	for {
+		select {
+		case msg, ok := <-c.Send:
+			if !ok {
+				return
+			}
+			if err := c.Conn.WriteMessage(websocket.TextMessage, msg); err != nil {
+				return
+			}
+		case <-ticker.C:
+			if err := c.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -137,17 +182,28 @@ func GetUserClient(userID string) *UserClient {
 	return userClients[userID]
 }
 
-func RemoveUserClient(userID string) {
+// RemoveUserClient tears down one specific connection. If the client has
+// already reconnected since this one was registered (userClients[userID]
+// now points at a different *UserClient), that newer connection is left
+// alone — a blind delete-by-userID here would otherwise let a slow-to-die
+// stale connection's cleanup evict (and even forcibly close, if it also
+// closed the map's current Conn) a connection that's actively in use,
+// intermittently knocking a still-connected client offline for no reason.
+func RemoveUserClient(client *UserClient) {
+	client.Conn.Close()
+
 	userClientsMu.Lock()
-	if client, ok := userClients[userID]; ok {
-		client.Conn.Close()
-		delete(userClients, userID)
-		delete(onlineUsers, userID)
+	current, ok := userClients[client.UserID]
+	stillCurrent := ok && current == client
+	if stillCurrent {
+		delete(userClients, client.UserID)
+		delete(onlineUsers, client.UserID)
 	}
 	userClientsMu.Unlock()
 
-	// Broadcast that this user is now offline
-	go broadcastOnlineStatus(userID, "offline")
+	if stillCurrent {
+		go broadcastOnlineStatus(client.UserID, "offline")
+	}
 }
 
 func SendIncomingCall(fromUserID, toUserID, fromUsername, profilePicture, callType string) bool {
@@ -201,6 +257,19 @@ func SendCallRejected(toUserID string) {
 	bytes, _ := json.Marshal(msg)
 	toClient.Send <- bytes
 }
+
+// AreFriends reports whether two users have an accepted friend
+// relationship — the prerequisite for messaging or calling each other.
+// Group chat is unaffected: group membership has its own invite system
+// and doesn't require a 1:1 friendship between members.
+func AreFriends(userA, userB string) bool {
+	var row models.UserContact
+	err := config.DB.Where(
+		"((user_id = ? AND contact_id = ?) OR (user_id = ? AND contact_id = ?)) AND status = ?",
+		userA, userB, userB, userA, "accepted",
+	).First(&row).Error
+	return err == nil
+}
 func SendChatMessage(fromUserID, toUserID, content string) {
 	parsedTime := time.Now().UTC()
 
@@ -217,6 +286,7 @@ func SendChatMessage(fromUserID, toUserID, content string) {
 		ToUserID:   toUserID,
 		Content:    encryptedContent,
 		Timestamp:  parsedTime,
+		Read:       false,
 	}
 
 	if err := config.DB.Create(&message).Error; err != nil {
@@ -224,18 +294,119 @@ func SendChatMessage(fromUserID, toUserID, content string) {
 		return
 	}
 
-	// 📡 Send encrypted content via socket
+	// 📡 Send plaintext content via socket to a connected recipient
+	toClient := GetUserClient(toUserID)
+	if toClient != nil {
+		msg := map[string]interface{}{
+			"type":      "chat_message",
+			"from":      fromUserID,
+			"content":   content, // plaintext; encryption is at-rest only, not E2EE
+			"timestamp": parsedTime.Format(time.RFC3339),
+		}
+		msgBytes, _ := json.Marshal(msg)
+		toClient.Send <- msgBytes
+		return
+	}
+
+	// 📴 Recipient not connected — fall back to a push notification so they
+	// still find out, same pattern as the incoming-call FCM fallback.
+	fmt.Printf("📛 User %s is not connected. Sending push notification instead.\n", toUserID)
+
+	var sender models.User
+	if err := config.DB.First(&sender, "id = ?", fromUserID).Error; err != nil {
+		fmt.Println("❌ Failed to fetch sender for push notification:", err)
+		return
+	}
+	var recipient models.User
+	if err := config.DB.First(&recipient, "id = ?", toUserID).Error; err != nil {
+		fmt.Println("❌ Failed to fetch recipient for push notification:", err)
+		return
+	}
+	if recipient.FCMToken == "" {
+		fmt.Printf("📛 User %s has no FCM token on file; cannot push.\n", toUserID)
+		return
+	}
+
+	go func() {
+		err := SendFCMNotification(
+			recipient.FCMToken,
+			sender.Username,
+			content,
+			map[string]string{
+				"type": "chat_message",
+				"from": fromUserID,
+			},
+		)
+		if err != nil {
+			fmt.Println("❌ Failed to send chat-message FCM notification:", err)
+		} else {
+			fmt.Println("📲 FCM chat notification sent to", recipient.Username)
+		}
+	}()
+}
+
+// SendGroupInvite notifies an invited user of a new pending group invite —
+// live over their socket if connected, falling back to an FCM push (same
+// pattern as SendChatMessage) so invites aren't silently missed while the
+// app is backgrounded or closed.
+func SendGroupInvite(toUserID, inviteID, groupID, groupName, picture, invitedByUsername string) {
+	toClient := GetUserClient(toUserID)
+	if toClient != nil {
+		msg := map[string]interface{}{
+			"type":      "group_invite",
+			"inviteId":  inviteID,
+			"groupId":   groupID,
+			"groupName": groupName,
+			"picture":   picture,
+			"invitedBy": invitedByUsername,
+		}
+		msgBytes, _ := json.Marshal(msg)
+		toClient.Send <- msgBytes
+		return
+	}
+
+	var recipient models.User
+	if err := config.DB.First(&recipient, "id = ?", toUserID).Error; err != nil {
+		fmt.Println("❌ Failed to fetch recipient for group-invite push notification:", err)
+		return
+	}
+	if recipient.FCMToken == "" {
+		fmt.Printf("📛 User %s has no FCM token on file; cannot push group invite.\n", toUserID)
+		return
+	}
+
+	go func() {
+		err := SendFCMNotification(
+			recipient.FCMToken,
+			invitedByUsername,
+			fmt.Sprintf("Invited you to %q", groupName),
+			map[string]string{
+				"type":     "group_invite",
+				"inviteId": inviteID,
+				"groupId":  groupID,
+			},
+		)
+		if err != nil {
+			fmt.Println("❌ Failed to send group-invite FCM notification:", err)
+		} else {
+			fmt.Println("📲 FCM group-invite notification sent to", recipient.Username)
+		}
+	}()
+}
+
+// SendTypingStatus relays an ephemeral typing indicator to the recipient's
+// socket, if they're currently connected. Not persisted — typing state has
+// no meaning once the moment has passed.
+func SendTypingStatus(fromUserID, toUserID string, isTyping bool) {
 	toClient := GetUserClient(toUserID)
 	if toClient == nil {
-		fmt.Printf("📛 User %s is not connected. Cannot deliver message.\n", toUserID)
 		return
 	}
 
 	msg := map[string]interface{}{
-		"type":      "chat_message",
-		"from":      fromUserID,
-		"content":   encryptedContent, // still encrypted; decrypt on client if E2EE
-		"timestamp": parsedTime.Format(time.RFC3339),
+		"type":     "typing",
+		"from":     fromUserID,
+		"isTyping": isTyping,
 	}
 	bytes, _ := json.Marshal(msg)
 	toClient.Send <- bytes

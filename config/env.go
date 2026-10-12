@@ -12,6 +12,10 @@ var (
 	EncryptionKey          []byte
 	JWTSecret              []byte
 	ServiceAccountFilePath string
+	SMTPHost               string
+	SMTPPort               string
+	SMTPFrom               string
+	SMTPPassword           string
 )
 
 func LoadEnv() {
@@ -44,6 +48,24 @@ func LoadEnv() {
 	ServiceAccountFilePath = os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
 	if ServiceAccountFilePath == "" {
 		log.Fatal("❌ GOOGLE_APPLICATION_CREDENTIALS not set")
+	}
+
+	// Load SMTP credentials
+	SMTPFrom = os.Getenv("SMTP_FROM")
+	if SMTPFrom == "" {
+		log.Fatal("❌ SMTP_FROM not set")
+	}
+	SMTPPassword = os.Getenv("SMTP_PASSWORD")
+	if SMTPPassword == "" {
+		log.Fatal("❌ SMTP_PASSWORD not set")
+	}
+	SMTPHost = os.Getenv("SMTP_HOST")
+	if SMTPHost == "" {
+		SMTPHost = "smtp.gmail.com"
+	}
+	SMTPPort = os.Getenv("SMTP_PORT")
+	if SMTPPort == "" {
+		SMTPPort = "587"
 	}
 
 	log.Println("✅ Environment variables loaded")

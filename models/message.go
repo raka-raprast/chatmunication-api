@@ -8,4 +8,5 @@ type Message struct {
 	ToUserID   string    `gorm:"not null"`
 	Content    string    `gorm:"type:text;not null"`
 	Timestamp  time.Time `gorm:"autoCreateTime"`
+	Read       bool      `gorm:"not null;default:false"`
 }

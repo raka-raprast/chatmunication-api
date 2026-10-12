@@ -16,6 +16,7 @@ func main() {
 	routes.AuthRoutes(r)
 	routes.WebSocketRoutes(r)
 	routes.UserRoutes(r)
+	routes.GroupRoutes(r)
 
 	r.Run("0.0.0.0:2340")
 }
