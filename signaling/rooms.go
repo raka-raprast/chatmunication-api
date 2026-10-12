@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -16,6 +17,30 @@ type RoomPeer struct {
 	UserID string
 	RoomID string
 	*conn
+}
+
+// Limits on the replay buffer described in room.buffer.
+const (
+	maxBufferedFrames = 64
+	maxBufferedBytes  = 256 * 1024
+	bufferTTL         = 90 * time.Second
+)
+
+// room holds the peers of one call plus a short replay buffer.
+//
+// Signaling is not symmetric in time: whichever side is ready first starts
+// emitting its SDP offer and ICE candidates immediately. If the other side
+// has not joined yet those frames used to be dropped on the floor, and
+// since neither side ever retransmits, the call sat in "connecting"
+// forever. Buffering them briefly and replaying to the second peer closes
+// that race without the clients changing anything.
+type room struct {
+	peers map[*RoomPeer]struct{}
+
+	buffer      [][]byte
+	bufferBytes int
+	bufferFrom  string
+	bufferedAt  time.Time
 }
 
 // rooms holds every signaling room. A single mutex guards it.
@@ -30,7 +55,7 @@ type RoomPeer struct {
 // modes by construction.
 var (
 	roomsMu sync.Mutex
-	rooms   = make(map[string]map[*RoomPeer]struct{})
+	rooms   = make(map[string]*room)
 )
 
 // CanonicalRoomID makes a room name independent of which peer built it.
@@ -77,7 +102,8 @@ func RoomParticipants(roomID string) (string, string, bool) {
 	return a, b, true
 }
 
-// JoinRoom adds a peer and acknowledges with the current occupancy.
+// JoinRoom adds a peer, acknowledges with the current occupancy, and
+// replays any signaling the other side sent before this peer arrived.
 //
 // If the same user already has a peer in this room, that older peer is
 // evicted: it is a ghost left behind by a killed app or a dropped network,
@@ -90,24 +116,33 @@ func JoinRoom(roomID, userID string, ws *websocket.Conn) *RoomPeer {
 		conn:   newConn(ws, "room "+roomID+" user "+userID),
 	}
 
-	var evicted []*RoomPeer
+	var (
+		evicted []*RoomPeer
+		replay  [][]byte
+	)
 
 	roomsMu.Lock()
-	set, ok := rooms[roomID]
+	r, ok := rooms[roomID]
 	if !ok {
-		set = make(map[*RoomPeer]struct{}, 2)
-		rooms[roomID] = set
+		r = &room{peers: make(map[*RoomPeer]struct{}, 2)}
+		rooms[roomID] = r
 	}
 	if userID != "" {
-		for existing := range set {
+		for existing := range r.peers {
 			if existing.UserID == userID {
 				evicted = append(evicted, existing)
-				delete(set, existing)
+				delete(r.peers, existing)
 			}
 		}
 	}
-	set[peer] = struct{}{}
-	userCount := len(set)
+	r.peers[peer] = struct{}{}
+	userCount := len(r.peers)
+
+	// Replay only what the *other* side buffered, and only while fresh.
+	if len(r.buffer) > 0 && r.bufferFrom != userID && time.Since(r.bufferedAt) < bufferTTL {
+		replay = r.buffer
+		r.buffer, r.bufferBytes, r.bufferFrom = nil, 0, ""
+	}
 	roomsMu.Unlock()
 
 	// Tear down ghosts outside the lock; their own read loops will run
@@ -124,6 +159,13 @@ func JoinRoom(roomID, userID string, ws *websocket.Conn) *RoomPeer {
 		peer.enqueue(payload)
 	}
 
+	for _, frame := range replay {
+		peer.enqueue(frame)
+	}
+	if len(replay) > 0 {
+		log.Printf("↩️ room %s: replayed %d buffered frame(s) to %s", roomID, len(replay), userID)
+	}
+
 	log.Printf("🎥 room %s: user %s joined (%d in room)", roomID, userID, userCount)
 	return peer
 }
@@ -136,15 +178,15 @@ func LeaveRoom(peer *RoomPeer) {
 	peer.close()
 
 	roomsMu.Lock()
-	set, ok := rooms[peer.RoomID]
+	r, ok := rooms[peer.RoomID]
 	var remaining []*RoomPeer
 	if ok {
-		delete(set, peer)
-		if len(set) == 0 {
+		delete(r.peers, peer)
+		if len(r.peers) == 0 {
 			delete(rooms, peer.RoomID)
 		} else {
-			remaining = make([]*RoomPeer, 0, len(set))
-			for p := range set {
+			remaining = make([]*RoomPeer, 0, len(r.peers))
+			for p := range r.peers {
 				remaining = append(remaining, p)
 			}
 		}
@@ -168,18 +210,57 @@ func LeaveRoom(peer *RoomPeer) {
 
 // Relay forwards a signaling frame (SDP offer/answer, ICE candidate) to
 // every other peer in the room. The peer list is snapshotted under the lock
-// and delivered after releasing it.
+// and delivered after releasing it. When the peer is alone the frame is
+// buffered for whoever joins next, rather than discarded.
 func (peer *RoomPeer) Relay(payload []byte) {
+	var probe struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(payload, &probe)
+	if probe.Type == "" {
+		probe.Type = "<untyped>"
+	}
+
 	roomsMu.Lock()
-	set := rooms[peer.RoomID]
-	others := make([]*RoomPeer, 0, len(set))
-	for p := range set {
-		if p != peer {
-			others = append(others, p)
+	r := rooms[peer.RoomID]
+	var others []*RoomPeer
+	buffered := false
+	if r != nil {
+		others = make([]*RoomPeer, 0, len(r.peers))
+		for p := range r.peers {
+			if p != peer {
+				others = append(others, p)
+			}
+		}
+		if len(others) == 0 {
+			// Alone: hold the frame for the peer that joins next.
+			if r.bufferFrom != peer.UserID {
+				r.buffer, r.bufferBytes = nil, 0
+				r.bufferFrom = peer.UserID
+			}
+			if len(r.buffer) < maxBufferedFrames && r.bufferBytes+len(payload) <= maxBufferedBytes {
+				frame := make([]byte, len(payload))
+				copy(frame, payload)
+				r.buffer = append(r.buffer, frame)
+				r.bufferBytes += len(payload)
+				r.bufferedAt = time.Now()
+				buffered = true
+			}
 		}
 	}
 	roomsMu.Unlock()
 
+	if len(others) == 0 {
+		if buffered {
+			log.Printf("🗃️ room %s: %s from %s buffered for a late joiner", peer.RoomID, probe.Type, peer.UserID)
+		} else {
+			log.Printf("⚠️ room %s: dropped %q from %s — nobody else present and buffer full",
+				peer.RoomID, probe.Type, peer.UserID)
+		}
+		return
+	}
+
+	log.Printf("📡 room %s: %s from %s -> %d peer(s)", peer.RoomID, probe.Type, peer.UserID, len(others))
 	for _, p := range others {
 		p.enqueue(payload)
 	}
@@ -195,5 +276,8 @@ func (peer *RoomPeer) Serve() {
 func RoomOccupancy(roomID string) int {
 	roomsMu.Lock()
 	defer roomsMu.Unlock()
-	return len(rooms[roomID])
+	if r := rooms[roomID]; r != nil {
+		return len(r.peers)
+	}
+	return 0
 }

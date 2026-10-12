@@ -83,9 +83,15 @@ func UserSocketHandler(w http.ResponseWriter, r *http.Request) {
 func handleUserFrame(client *signaling.UserClient, user *models.User, f frame) {
 	userID := user.ID.String()
 
+	// Every inbound frame is logged: a call that silently does nothing is
+	// otherwise indistinguishable from a frame that never arrived.
+	log.Printf("📥 %s -> %q (to=%q from=%q room=%q groupId=%q)",
+		user.Username, f.Type, f.To, f.From, f.Room, f.GroupID)
+
 	switch f.Type {
 	case "call_user":
 		if f.To == "" {
+			log.Printf("⚠️ %s sent call_user with no \"to\" field", user.Username)
 			return
 		}
 		callType := f.CallType
@@ -138,6 +144,7 @@ func handleUserFrame(client *signaling.UserClient, user *models.User, f frame) {
 
 	case "call_accepted":
 		if f.From == "" {
+			log.Printf("⚠️ %s sent call_accepted with no \"from\" field; cannot tell the caller to join", user.Username)
 			return
 		}
 		log.Printf("✅ %s accepted call, joining room %s", user.Username, f.Room)

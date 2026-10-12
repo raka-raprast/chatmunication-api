@@ -235,6 +235,60 @@ func TestRelayReachesPeerThatJoinedWithReversedRoomID(t *testing.T) {
 	}
 }
 
+// Whichever side is ready first starts emitting SDP immediately. If the
+// other peer has not joined yet, those frames must not be lost: neither
+// client retransmits, so a dropped offer strands the call in "connecting".
+func TestOfferSentBeforePeerJoinsIsReplayed(t *testing.T) {
+	a := "ea9b927b-92c7-42e9-b570-e2e18bb4dac8"
+	b := "c983d651-9da5-4ab8-a598-a292bc9bdff6"
+	room := CanonicalRoomID(a + "-" + b)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ws, err := testUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		peer := JoinRoom(room, r.URL.Query().Get("user"), ws)
+		defer LeaveRoom(peer)
+		peer.Serve()
+	}))
+	defer srv.Close()
+
+	caller, _, err := websocket.DefaultDialer.Dial(wsURL(srv, "/?user="+a), nil)
+	if err != nil {
+		t.Fatalf("dial caller: %v", err)
+	}
+	defer caller.Close()
+	waitOccupancy(t, room, 1)
+
+	// Caller emits its offer while still alone.
+	offer := []byte(`{"type":"offer","sdp":"v=0 early"}`)
+	if err := caller.WriteMessage(websocket.TextMessage, offer); err != nil {
+		t.Fatalf("write early offer: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	callee, _, err := websocket.DefaultDialer.Dial(wsURL(srv, "/?user="+b), nil)
+	if err != nil {
+		t.Fatalf("dial callee: %v", err)
+	}
+	defer callee.Close()
+
+	// join_ack first, then the replayed offer.
+	callee.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := callee.ReadMessage(); err != nil {
+		t.Fatalf("join_ack: %v", err)
+	}
+	callee.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, got, err := callee.ReadMessage()
+	if err != nil {
+		t.Fatalf("offer sent before the callee joined was dropped: %v", err)
+	}
+	if string(got) != string(offer) {
+		t.Fatalf("replayed frame = %q, want %q", got, offer)
+	}
+}
+
 // A second connection from the same user replaces the first: a ghost peer
 // left by a killed app otherwise inflates occupancy and strands the call.
 func TestRejoinEvictsGhostPeer(t *testing.T) {
